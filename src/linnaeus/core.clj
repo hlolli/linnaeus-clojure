@@ -108,14 +108,17 @@
                 (into init val)
                 (into init (flatten val))))) [] body))
 
-(defn defpart [part-name csound-params & body]
+(def global-defaults
+  "global = {\\numericTimeSignature \\tempo \"Andante\" 4 = 90}")
+
+(defn defpart [part-name metadata & body]
   (swap! ly-parts assoc (keyword part-name)
          (fn [global]
            (let [;; ly# (map first ~body)
                  body (flatten-lists body)
                  global (assoc global
                                :part-name part-name
-                               :csound-params csound-params
+                               :csound-params (:csound-params metadata)
                                :linear-time 0
                                :dynamic-time 0
                                :last-dur 0)
@@ -133,15 +136,27 @@
                      (expr global))]
              ;; (prn timeline)
              (if timeline
-               [(format "\n%s = {%s}" part-name (nth timeline 0) ;;part-name (string/join " " (map :ly timeline))
-                        ) (nth timeline 1)]
+               [(format (str "\n%s = \\new Staff \\with {"
+                             "instrumentName = \"%s\""
+                             "shortInstrumentName = \"%s\""
+                             "} <<{%s} {\\global}>>")
+                        (or (:instrument-name metadata) part-name)
+                        (or (:instrument-name metadata) part-name)
+                        (or (:short-instrument-name metadata) (str (subs (str part-name) 0 3) "."))
+                        (nth timeline 0))
+                (nth timeline 1)]
                [nil nil])))))
 
 
-(defn defscore [score-name headers global & parts]
+(defn defscore [score-name headers & parts]
   (swap! ly-scores assoc (keyword score-name)
          (fn []
-           (let [all-parts (mapv #((keyword %) @ly-parts) parts)
+           (let [header (apply str (for [h headers] (str (name (first h)) " = " "\"" (second h) "\"")))
+                 global-from-state ((keyword (str score-name "-global")) @ly-parts)
+                 global (if global-from-state (second global-from-state) {})
+                 global-ly (if global-from-state (first global-from-state)
+                               "\nglobal = {\\numericTimeSignature \\tempo \"Andante\" 4 = 90}\n")
+                 all-parts (mapv #((keyword %) @ly-parts) parts)
                  ly-csnd-v (for [part all-parts]
                              (part global))]
              ;; (prn "ly-csnd-v" ly-csnd-v)
@@ -149,10 +164,18 @@
                                 "\\language \"%s\"\n")
                            (:version @ly-config)
                            (name (:language @ly-config)))
+                   (format "\\header {\n%s\n}" header)
+                   global-ly
                    (apply str (map first ly-csnd-v))
                    (format "\\score { << %s >>}"
                            (string/join " " (map #(str "\\" %) parts))))
               (string/join "\n" (map second ly-csnd-v))]))))
+
+
+(defn defglobal [score-name & body]
+  (swap! ly-parts assoc (keyword (str score-name "-global"))
+         (let [body (flatten-lists body)]
+           [(format "\nglobal = {\\numericTimeSignature \n %s \n}" "")])))
 
 (defn render-debug [score-name]
   (((keyword score-name) @ly-scores)))
@@ -187,7 +210,9 @@
                    (n :c2)
                    (n :e2))))
 
-(defscore 'partitur {} {}
+(defscore 'partitur
+  {:title "prufa1"
+   :composer "yomama"}
   'violin
   'viola)
 
