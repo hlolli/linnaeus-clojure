@@ -137,8 +137,8 @@
              ;; (prn timeline)
              (if timeline
                [(format (str "\n%s = \\new Staff \\with {"
-                             "instrumentName = \"%s\""
-                             "shortInstrumentName = \"%s\""
+                             "instrumentName = \"%s\" "
+                             "shortInstrumentName = \"%s\" "
                              "} <<{%s} {\\global}>>")
                         (or (:instrument-name metadata) part-name)
                         (or (:instrument-name metadata) part-name)
@@ -154,12 +154,14 @@
          (fn []
            (let [header (apply str (for [h headers] (str (name (first h)) " = " "\"" (second h) "\"")))
                  global-from-state ((keyword (str score-name "-global")) @ly-parts)
-                 global (if global-from-state (second global-from-state) {:bpm 90})
+                 global {:bpm 90}
+                 ;; global (if global-from-state (second global-from-state) {:bpm 90})
                  global-ly (if global-from-state (first global-from-state)
                                "\nglobal = {\\numericTimeSignature }\n")
                  all-parts (mapv #((keyword %) @ly-parts) parts)
                  ly-csnd-v (for [part all-parts]
                              (part global))]
+             ;; (prn "helló?")
              ;; (prn "ly-csnd-v" ly-csnd-v)
              [(str (format (str "\\version \"%s\"\n"
                                 "\\language \"%s\"\n")
@@ -223,7 +225,6 @@
                                   (fn [bar] (if (== 1 (:beat global-map'))
                                               (inc bar) bar))))))
                 initial-global-map) index))
-
 
 (defn do-at
   ([bar change]
@@ -313,7 +314,8 @@
                                  (let [cur-event (first event)]
                                    (if-let [ly-str (first (last cur-event))]
                                      (let [next-time-change (first time-changes)
-                                           time-change-event? (contains? (second (last cur-event)) :time-signature)
+                                           time-change-event? (and (contains? (second (last cur-event)) :time-signature)
+                                                                   (== (first cur-event) (ffirst time-changes)))
                                            ly-spaceing (if (and (== last-bar (first cur-event))
                                                                 (== last-beat (second cur-event)))
                                                          " "
@@ -354,8 +356,6 @@
                                    :bar 1 :beat 1 :time-second 0}
                ;;(reduce #(conj %1 %2) [] time-signatures)
                ]
-           body
-           ly-golbal-str
            ;; bb-times-mapping
            ;; time-signatures
            ;; initial-global-map
@@ -365,16 +365,9 @@
 
 
 
-(prn (defglobal "a"
-       (do-at 1 (global-key-signature :a :minor))
-       (do-at 1 (global-time-signature 1 4))
-       (do-at 2 (global-time-signature 2 4))
-       (do-at 3 (global-time-signature 3 4))))
-
-
 ;; (time (get-data-from-global 
 
-(get-data-from-global 5)
+;; (get-data-from-global 5)
 
 ;; (nth (cons [666] (iterate inc 1)) 1)
 
@@ -384,6 +377,7 @@
 (defn render! [score-name]
   (let [start-time (. System (nanoTime))
         compiled-v (((keyword score-name) @ly-scores))]
+    (spit (str "out/" score-name ".ly") (first compiled-v))
     (spit (str "out/" score-name ".sco") (second compiled-v))
     (ly-compile-from-string
      (str score-name)
@@ -396,8 +390,8 @@
   (repeat 20
           (list (n :c3 :dur 1/4)
                 (n :d3)
-                (n :e3 :dur 1/2)
-                (n :f3 :dur 1)
+                (n :e3 )
+                (n :f3)
                 (n :g3))))
 
 (defpart 'viola
@@ -410,6 +404,15 @@
   (repeat 40 (list (n :d2)
                    (n :c2)
                    (n :e2))))
+
+(defglobal 'partitur
+  ;; (do-at 1 (global-key-signature :d :minor))
+  (do-at 1 (global-time-signature 1 4))
+  (do-at 2 (global-time-signature 2 4))
+  (do-at 3 (global-time-signature 7 4))
+  (do-at 4 (global-time-signature 3 4))
+  (do-at 5 (global-time-signature 1 2))
+  )
 
 (defscore 'partitur
   {:title "prufa1"
