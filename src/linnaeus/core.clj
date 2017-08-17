@@ -20,19 +20,6 @@
 
 (def ly-scores (atom {}))
 
-(def basic
-  "  \\version \"2.19.59\"
-
-  {
-   c' e' g' e'
-   }
-  ")
-
-
-#_(defpart violinI
-    (legato (n :c4 1/4) (n :c4) (n :cis4))
-    )
-
 ;; (ly-compile-from-string "hentumer" basic)
 
 (defn ly-compile-from-string
@@ -50,7 +37,7 @@
     :rendering))
 
 
-(defn parse-csound-event [dynamic-time current-dur csound-note opts global]
+(defn parse-csound-event [time-seconds current-dur csound-note opts global]
   ;; (prn "csnd opts: " global)
   (let [extra-p-fields (loop [csound-params (:csound-params global)
                               extra-p ""
@@ -66,11 +53,14 @@
                                         (or (get (:csound opts) param-name)
                                             (get (:csound global) param-name)
                                             (second (param-key csound-params))))
-                                      (inc cur-param))))))]
+                                      (inc cur-param))))))
+        ;; _ (prn (:bpm global))
+        p3-seconds (float (* (/ 60 (:bpm global))
+                             (/ current-dur (:beat-len global))))]
     (format "i \"%s\" %s %s %s"
             (:part-name global)
-            (float dynamic-time)
-            (float current-dur)
+            (float time-seconds)
+            p3-seconds
             extra-p-fields)))
 
 ;; Triplets of [ly csnd options]
@@ -87,12 +77,17 @@
                           (:last-dur global)
                           (if dur dur (:last-dur global)))
             linear-time (if chord? (:linear-time global) (+ (:last-dur global) (:linear-time global)))
-            dynamic-time linear-time
-            csound-event (parse-csound-event dynamic-time current-dur csound-note opts global)
+            global (merge global (if-let [global-fn (:global-fn global)]
+                                   (global-fn linear-time) {}))
+            time-seconds (if (contains? global :time-seconds)
+                           (+ (:time-seconds global)
+                              (* (/ 60 (:bpm global)) (:phase global)))
+                           linear-time)
+            ;; _ (println "Dynamic-time: " (float dynamic-time) "\n Linear-time: " (float linear-time))
+            csound-event (parse-csound-event time-seconds current-dur csound-note opts global)
             global (assoc global
                           :last-dur current-dur
-                          :linear-time linear-time
-                          :dynamic-time dynamic-time)]
+                          :linear-time linear-time)]
         ;;{:ly lilynote :csnd nil}
         [(str lilynote lilydur)
          
@@ -120,7 +115,7 @@
                                :part-name part-name
                                :csound-params (:csound-params metadata)
                                :linear-time 0
-                               :dynamic-time 0
+                               :time-seconds 0
                                :last-dur 0)
                  timeline (reduce (fn [init expr]
                                     (if (empty? init)
@@ -154,7 +149,10 @@
          (fn []
            (let [header (apply str (for [h headers] (str (name (first h)) " = " "\"" (second h) "\"")))
                  global-from-state ((keyword (str score-name "-global")) @ly-parts)
-                 global {:bpm 90}
+                 global (if global-from-state
+                          {:global-fn (second global-from-state)}
+                          ;; default data
+                          {:bpm 90})
                  ;; global (if global-from-state (second global-from-state) {:bpm 90})
                  global-ly (if global-from-state (first global-from-state)
                                "\nglobal = {\\numericTimeSignature }\n")
@@ -174,9 +172,16 @@
                            (string/join " " (map #(str "\\" %) parts))))
               (string/join "\n" (map second ly-csnd-v))]))))
 
-(defn global-time-signature [bar-len beat-len]
+(defn time-signature [bar-len beat-len]
   [(format "\n\\time %s/%s" bar-len beat-len)
    {:time-signature [bar-len (/ 1 beat-len)]}])
+
+
+(defn tempo [tempo-fn ly-text]
+  [(if (or (empty? ly-text) (nil? ly-text))
+     nil
+     [(format "\n\\tempo \"%s\"" ly-text)
+      {:tempo tempo-fn}])])
 
 (defn global-key-signature
   "change key signature globally
@@ -192,49 +197,62 @@
       (if (>= index (first (second v)))
         (rest v) v))))
 
-(defn get-data-from-global [index initial-global-map]
-  (nth (iterate (fn [global-map]
-                  (-> global-map
-                      (update :bpm-timeline (timeline-drop index))
-                      (as-> global-map'
-                          (update global-map' :bpm
-                                  (fn [bpm] (-> (:bpm-timeline global-map')
-                                                first second))))
-                      (update :time-signature-timeline (timeline-drop index))
-                      (as-> global-map'
-                          (update global-map' :bar-len
-                                  (fn [bar-len] (-> (:time-signature-timeline global-map')
-                                                    first second)))
-                        (update global-map' :beat-len
-                                (fn [bar-len] (-> (:time-signature-timeline global-map')
-                                                  first (nth 2)))))
-                      (as-> global-map'
-                          (update global-map'
-                                  :time-second (fn [time-second]
-                                                 (-> (:bpm global-map')
-                                                     (/ 60)
-                                                     (as-> x (/ 1 x))
-                                                     (* (:beat-len global-map'))
-                                                     (+ time-second)))))
-                      (as-> global-map'
-                          (update global-map' :beat
-                                  (fn [beat] (if (== beat (:bar-len global-map'))
-                                               1(inc beat)))))
-                      (as-> global-map'
-                          (update global-map' :bar
-                                  (fn [bar] (if (== 1 (:beat global-map'))
-                                              (inc bar) bar))))))
-                initial-global-map) index))
+
+;; (get-data-from-global {:bpm-timeline [[0 90] [4 60] [8 30]] :bpm 90
+;;                        :time-signature-timeline [[0N 1 1/4] [1/4 2 1/4] [1/2 7 1/4] [3/4 3 1/4] [1N 1 1/2]]
+;;                        :bar-len 1 :beat-len 1/4
+;;                        ;; Note to self: bar and beat start at 1
+;;                        :bar 1 :beat 1 :time-seconds 0} 0 0.5)
+
+
+(defn get-data-from-global [initial-global-map index phase]
+  (-> (nth (iterate (fn [global-map]
+                      (-> global-map
+                          (update :tempo-timeline (timeline-drop index))
+                          (as-> global-map'
+                              (update global-map' :bpm
+                                      (fn [_] ((-> (:tempo-timeline global-map')
+                                                   first second) global-map'))))
+                          (update :time-signature-timeline (timeline-drop index))
+                          (as-> global-map'
+                              (update global-map' :bar-len
+                                      (fn [bar-len] (-> (:time-signature-timeline global-map')
+                                                        first second)))
+                            (update global-map' :beat-len
+                                    (fn [bar-len] (-> (:time-signature-timeline global-map')
+                                                      first (nth 2)))))
+                          (as-> global-map'
+                              (update global-map'
+                                      :time-seconds (fn [time-seconds]
+                                                      (let [sec-per-beat (/ 60 (:bpm global-map'))]
+                                                        (+ sec-per-beat time-seconds)))))
+                          (as-> global-map'
+                              (update global-map' :beat
+                                      (fn [beat] (if (== beat (:bar-len global-map'))
+                                                   1 (inc beat)))))
+                          (as-> global-map'
+                              (update global-map' :bar
+                                      (fn [bar] (if (== 1 (:beat global-map'))
+                                                  (inc bar) bar))))))
+                    initial-global-map) index)
+      (assoc :phase phase)))
 
 (defn do-at
   ([bar change]
-   (list bar 1 change))
+   (if (> 1 bar)
+     (throw (Exception. (str bar ", musical bar must start at number 1")))
+     (list bar 1 change)))
   ([bar beat change]
-   (list bar beat change)))
+   (if (or (> 1 bar)
+           (> 1 beat))
+     (throw (Exception. (str bar beat ", musical bar or beat must start at number 1")))
+     (list bar beat change))))
 
 (defn defglobal [score-name & body]
   (swap! ly-parts assoc (keyword (str score-name "-global"))
          (let [time-signatures (->> (filter #(contains? (second (last %)) :time-signature) body)
+                                    (sort #(< (first %1) (first %2))))
+               tempo-indicators(->> (filter #(contains? (second (last %)) :tempo) body)
                                     (sort #(< (first %1) (first %2))))
                [initial-bar-len initial-beat-len] (if (= 1 (ffirst time-signatures))
                                                     (:time-signature (second (last (first time-signatures))))
@@ -242,7 +260,7 @@
                bb-times-mapping (loop [times time-signatures
                                        bb-times []
                                        last-change-bar 1
-                                       last-change-index 0
+                                       last-change-linear-time 0
                                        cur-bar-len initial-bar-len
                                        cur-beat-len initial-beat-len]
                                   (if (empty? times)
@@ -252,23 +270,22 @@
                                         (recur (rest times)
                                                bb-times
                                                last-change-bar
-                                               last-change-index
+                                               last-change-linear-time
                                                (first time-sig)
                                                (second time-sig))
                                         (let [cur-change-bar (ffirst times)
-                                              cur-change-index (+ last-change-index
-                                                                  (* cur-bar-len
-                                                                     cur-beat-len
-                                                                     (- cur-change-bar
-                                                                        last-change-bar)))]
+                                              cur-change-linear-time (+ last-change-linear-time
+                                                                        (* cur-bar-len
+                                                                           (- cur-change-bar
+                                                                              last-change-bar)))]
                                           (recur (rest times)
-                                                 ;; Spec: triplet [bar index [bar-len beat-len]]
+                                                 ;; Spec: triplet [bar linear-time [bar-len beat-len]]
                                                  (conj bb-times [(ffirst times)
-                                                                 cur-change-index
+                                                                 cur-change-linear-time
                                                                  [(first time-sig)
                                                                   (second time-sig)]])
                                                  cur-change-bar
-                                                 cur-change-index
+                                                 cur-change-linear-time
                                                  (first time-sig)
                                                  (second time-sig)))))))
                nearest-mapping-fn (fn [bar beat]
@@ -283,6 +300,7 @@
                                           cur-time-map
                                           (recur (rest time-map)
                                                  (first time-map))))))
+               ;; todo: rename index to linear-time??
                bb-to-index (fn [bar beat]
                              (if (empty? bb-times-mapping)
                                (+ (* initial-bar-len initial-beat-len (dec beat))
@@ -293,6 +311,79 @@
                                        (second (last nearest-mapping)))
                                     (* (dec beat) (second (last nearest-mapping)))
                                     (second nearest-mapping)))))
+               
+               linear-time-map (if (empty? bb-times-mapping)
+                                 []
+                                 (loop [bb-time bb-times-mapping
+                                        linear-time []
+                                        cur-bar-len initial-bar-len
+                                        last-bar 1
+                                        last-linear-time 0]
+                                   (if (empty? bb-time)
+                                     linear-time
+                                     (let [new-bar (ffirst bb-time)
+                                           new-linear-time (+ (* cur-bar-len
+                                                                 (if (empty? linear-time)
+                                                                   (dec (ffirst bb-time))
+                                                                   (- new-bar last-bar)))
+                                                              last-linear-time)]
+                                       (recur (rest bb-time)
+                                              (conj linear-time [new-linear-time
+                                                                 (last (first bb-time))])
+                                              (-> bb-time first last first)
+                                              new-bar
+                                              new-linear-time)))))
+
+               linear-time-nearest-mapping-fn (fn [linear-time]
+                                                (loop [time-map linear-time-map
+                                                       cur-time-map (if (zero? (ffirst linear-time-map))
+                                                                      (first linear-time-map)
+                                                                      [0 [initial-bar-len initial-beat-len]])]
+                                                  ;; (prn "timemap" time-map "cur-time-map" cur-time-map)
+                                                  (if (empty? time-map)
+                                                    cur-time-map
+                                                    (if (and (>= linear-time (first cur-time-map))
+                                                             (< linear-time (ffirst time-map)))
+                                                      cur-time-map
+                                                      (recur (rest time-map)
+                                                             (first time-map))))))
+               linear-time-to-index (fn [linear-time]
+                                      (if (empty? linear-time-map)
+                                        ;; duplet [index beat-phase]
+                                        (let [index (quot linear-time initial-beat-len)
+                                              beat-phase (/ (- (/ linear-time index) initial-beat-len)
+                                                            initial-beat-len)
+                                              beat-phase (if (zero? index)
+                                                           (/ linear-time initial-beat-len)
+                                                           beat-phase)]
+                                          [index beat-phase])
+                                        (let [nearest-mapping (linear-time-nearest-mapping-fn linear-time)
+                                              ;; _ (prn nearest-mapping)
+                                              index-to-point (quot (first nearest-mapping)
+                                                                   (-> nearest-mapping last second))
+                                              index-from-last-point (quot (- linear-time (first nearest-mapping))
+                                                                          (-> nearest-mapping last second))
+                                              index (+ index-to-point index-from-last-point)
+                                              beat-phase (if (zero? index-from-last-point)
+                                                           (/ (- linear-time (first nearest-mapping))
+                                                              (-> nearest-mapping last second))
+                                                           (/ (- (/ (- linear-time (first nearest-mapping))
+                                                                    index-from-last-point)
+                                                                 (-> nearest-mapping last second))
+                                                              (-> nearest-mapping last second)))]
+                                          ;; (prn "lineat-time: " linear-time "index: " index "phase: " beat-phase)
+                                          [index beat-phase])))
+
+               tempo-timeline (if (empty? tempo-indicators)
+                                [[0 (constantly 90)]]
+                                (let [tempos (apply vector (for [tempo tempo-indicators]
+                                                             (into [(apply bb-to-index (subvec (vec tempo) 0 2))]
+                                                                   (:tempo (last tempo)))))]
+                                  (if (zero? (ffirst tempos))
+                                    tempos
+                                    (into [[0 (constantly 90)]]
+                                          tempos))))
+
                time-signature-timeline (if (empty? time-signatures)
                                          [[0 initial-bar-len initial-beat-len]]
                                          (let [times-timeline (apply vector (for [times time-signatures]
@@ -349,19 +440,19 @@
                                             cur-beat-len
                                             last-bar
                                             last-bar)))))
-               initial-global-map {:bpm-timeline [[0 120] [4 60] [8 30]] :bpm 120
+               initial-global-map {:tempo-timeline tempo-timeline :bpm 90
                                    :time-signature-timeline time-signature-timeline
                                    :bar-len initial-bar-len :beat-len initial-beat-len
-                                   ;; Note to self: bar and beat start at index 1
-                                   :bar 1 :beat 1 :time-second 0}
+                                   ;; Note to self: bar and beat start at 1
+                                   :bar 1 :beat 1 :time-seconds 0}
                ;;(reduce #(conj %1 %2) [] time-signatures)
                ]
-           ;; bb-times-mapping
-           ;; time-signatures
+           ;; (prn bb-times-mapping)
+           ;; (prn time-signature-timeline)
            ;; initial-global-map
            [(format "\nglobal = {\\numericTimeSignature \n %s \n}" ly-golbal-str)
-            (fn [index]
-              (get-data-from-global index initial-global-map))])))
+            (fn [linear-time]
+              (apply get-data-from-global initial-global-map (linear-time-to-index linear-time)))])))
 
 
 
@@ -387,40 +478,38 @@
 
 (defpart 'violin
   {:p4 [:amp -8] :p5 [:freq 440]}
-  (repeat 20
-          (list (n :c3 :dur 1/4)
-                (n :d3)
-                (n :e3 )
-                (n :f3)
-                (n :g3))))
+  (n :c3 :dur 1/4)
+  (n :d3)
+  (n :e3 )
+  (n :f3)
+  (n :g3)
+  (n :a3 :dur 1/2)
+  (n :h3))
 
 (defpart 'viola
   {:p4 [:amp -8] :p5 [:freq 440]}
   (n :c3 :dur 1/8)
-  (repeat 10 (list (n :h2) (n :c4)))
-  (repeat 10 (list (n :a2)
-                   (n :g2)
-                   (n :f2)))
-  (repeat 40 (list (n :d2)
-                   (n :c2)
-                   (n :e2))))
+  (n :d3)
+  (n :e3)
+  (n :f3))
 
 (defglobal 'partitur
   ;; (do-at 1 (global-key-signature :d :minor))
-  (do-at 1 (global-time-signature 1 4))
-  (do-at 2 (global-time-signature 2 4))
-  (do-at 3 (global-time-signature 7 4))
-  (do-at 4 (global-time-signature 3 4))
-  (do-at 5 (global-time-signature 1 2))
+  (do-at 1 (time-signature 1 4))
+  (do-at 2 (time-signature 2 4))
+  (do-at 3 (time-signature 7 4))
+  (do-at 4 (time-signature 3 4))
+  (do-at 5 (time-signature 1 4))
   )
 
 (defscore 'partitur
   {:title "prufa1"
    :composer "yomama"}
   'violin
-  'viola)
+  ;;'viola
+  )
 
-(render! 'partitur)
+;; (render! 'partitur)
 
 
 ;; (sort-by #(+ (first %) (* 0.1 (second %))) < '((99 1) (99 3) (99 0) (0 10) (0 1) (0 0)))
